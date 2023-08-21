@@ -1,0 +1,10 @@
+Why transformers are significant? [Source: https://www.tensorflow.org/text/tutorials/transformer]
+    - Transformer excel at modeling sequential data, such as natural language
+    - Unlike RNNs, transformers are parallelizable, this make them efficient on GPU or TPU.
+      The main reason is Transformer replaced RNN with attention, and computations can happen simultaneously.
+      Layer outputs can be computed in parallel, instead of a series like an RNN.
+    - Unlike RNNs or CNNs, Transformer is able to capture distant or long-range contexts and dependencies in the data
+      between distant positions in the input or output sequences. Thus, longer connections can be learned. Attention allows
+      each location to have access to the entire input at each layer. While in RNNs, CNNs, the information needs to
+      pass through many processing steps to move a long distance, which make it harder to learn
+    - Transformer make no assumptions about the temporal/spatial relationships across the data. This is ideal for processing a set of objects 
