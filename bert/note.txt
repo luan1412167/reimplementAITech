@@ -1,0 +1,4 @@
+Bert solves two tasks simultaneously:
+    - Next Sentence Prediction(NSP)
+    - Masked Language Model (MLM)
+    
