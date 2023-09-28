@@ -1,4 +1,8 @@
 Bert solves two tasks simultaneously:
     - Next Sentence Prediction(NSP)
     - Masked Language Model (MLM)
-    
+
+Bert has 3 embedding layers:
+    - Token Embedding
+    - Segment Embedding
+    - Position Embedding
