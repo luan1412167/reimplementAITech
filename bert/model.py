@@ -1,10 +1,14 @@
-
-from os import device_encoding
-from random import shuffle
-from turtle import forward
+from typing import Any
 import torch
-
+from torch import nn
 from dataset import IMDBBertDataset
+import torch.nn.functional as f
+import time
+from datetime import datetime
+from pathlib import Path
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class JointEmbedding(nn.Module):
 
@@ -12,7 +16,7 @@ class JointEmbedding(nn.Module):
         super(JointEmbedding, self).__init__()
 
         self.size = size
-        self.tokem_emb = nn.Embedding(vocal_size, size)
+        self.token_emb = nn.Embedding(vocal_size, size)
         self.segment_emb = nn.Embedding(vocal_size, size)
         self.norm = nn.LayerNorm(size)
 
@@ -27,7 +31,7 @@ class JointEmbedding(nn.Module):
     def attention_position(self, dim, input_tensor):
         batch_size = input_tensor.size(0)
         sentence_size = input_tensor.size(-1)
-        pos = torch.arage(sentence_size, dtype=torch.long).to(device)
+        pos = torch.arange(sentence_size, dtype=torch.long).to(device)
         d= torch.arange(dim, dtype=torch.long).to(device)
         d = (2*d/dim)
         pos = pos.unsqueeze(1)
@@ -79,7 +83,7 @@ class Encoder(nn.Module):
         self.attention = MultiHeadAttention(attention_heads, dim_inp, dim_out)
         self.feed_forward = nn.Sequential(
             nn.Linear(dim_inp, dim_out),
-            dd.Dropout(dropout),
+            nn.Dropout(dropout),
             nn.GELU(),
             nn.Linear(dim_out, dim_inp),
             nn.Dropout(dropout)
@@ -130,9 +134,83 @@ class BertTrainer:
         self.writer = SummaryWriter(str(log_dir))
         self.checkpoint_dir = checkpoint_dir
         self.criterion = nn.BCEWithLogitsLoss().to(device)
-        self.ml_criterion = nn.NLLLoss(ignore_index=0).tod(device)
+        self.ml_criterion = nn.NLLLoss(ignore_index=0).to(device)
         self.optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0.015)
+        self._splitter_size = 35
+
+        self._ds_len = len(self.dataset)
+        self._batched_len = self._ds_len // self.batch_size
+        self._print_every = print_progress_every
+        self._accuracy_every = print_accuracy_every
         
+    def print_summary(self):
+        ds_len = len(self.dataset)
+        print('Model Summary')
+        print("="* self._splitter_size)
+        print("Device ", device)
+        print("Training dataset len: ", ds_len)
+        print(f"Max / Optimal sentence len: {self.dataset.optimal_sentence_length}")
+        print(f"Vocab size: {len(self.dataset.vocab)}")
+        print(f"Batch size: {self.batch_size}")
+        print(f"Batched dataset len: {self._batched_len}")
+        print('=' * self._splitter_size)
+        print()
+    
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        for self.current_epoch in range(self.current_epoch, self.epochs):
+            loss = self.train(self.current_epoch)
+            self.save_checkpoint(self.current_epoch, step=-1, loss=loss)
+    def training_summary(self, elapsed, index, average_nsp_loss, average_mlm_loss):
+        passed = percentage(self.batch_size, self._ds_len, index)
+        global_step = self.current_epoch * len(self.loader) + index
+        print_nsp_loss = average_nsp_loss / self._print_every
+        print_mlm_loss = average_mlm_loss / self._print_every
+        s = f"{time.strftime('%H:%M:%S', elapsed)}"
+        s += f" | Epoch {self.current_epoch + 1} | {index} / {self._batched_len} ({passed}%) | " \
+             f"NSP loss {print_nsp_loss:6.2f} | MLM loss {print_mlm_loss:6.2f}"
+
+        self.writer.add_scalar("NSP loss", print_nsp_loss, global_step=global_step)
+        self.writer.add_scalar("MLM loss", print_mlm_loss, global_step=global_step)
+        return s
+    
+
+    def accuracy_summary(self, index, token, nsp, token_target, nsp_target, inverse_token_mask):
+        global_step = self.current_epoch * len(self.loader) + index
+        nsp_acc = nsp_accuracy(nsp, nsp_target)
+        token_acc = token_accuracy(token, token_target, inverse_token_mask)
+        self.writer.add_scalar("NSP train accuracy", nsp_acc, global_step=global_step)
+        self.writer.add_scalar("Token train accuracy", token_acc, global_step=global_step)
+        return f"| NSP accuracy {nsp_acc} | Token accuracy {token_acc}"
+    
+    def save_checkpoint(self, epoch, step, loss):
+        if not self.checkpoint_dir:
+            return
+        prev = time.time()
+        name = f"bert_epoch_{epoch}_step_{step}_{datetime.utcnow().timestamp():.0f}.pt"
+
+        torch.save({
+            'epoch' : epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'loss': loss
+            }, self.checkpoint_dir.joinpath(name))
+        
+        print()
+        print('=' * self._splitter_size)
+        print(f"Model saved as '{name}' for {time.time() - prev:.2f}s")
+        print('=' * self._splitter_size)
+        print()
+
+
+    def load_checkpoint(self, path: Path):
+        print('=' * self._splitter_size)
+        print(f"Restoring model {path}")
+        checkpoint = torch.load(path)
+        self.current_epoch = checkpoint['epoch']
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print("Model is restored.")
+        print('=' * self._splitter_size)
 
     def train(self, epoch: int):
         print("Training epoch: ", epoch)
@@ -159,9 +237,23 @@ class BertTrainer:
                 elapsed = time.gmtime(time.time() - prev) 
                 s = self.training_summary(elapsed, index, average_nsp_loss, average_mlm_loss)
                 if index % self._accuracy_every == 0:
-                    s += self.accuracy_summary(index, token, nsp, token_target, nsp_target)
+                    s += self.accuracy_summary(index, token, nsp, token_target, nsp_target, inverse_token_mask)
                 print(s)
 
                 average_nsp_loss = 0
         average_mlm_loss = 0
         return loss
+    
+def percentage(batch_size: int, max_index: int, current_index: int):
+    batched_max = max_index // batch_size
+    return round(current_index / batched_max*100, 2)
+
+def nsp_accuracy(result: torch.Tensor, target: torch.Tensor):
+    s = (result.argmax(1) == target.argmax(1)).sum()
+    return round(float(s/ result.size(0)), 2)
+
+def token_accuracy(result: torch.Tensor, target: torch.Tensor, inverse_token_mask: torch.Tensor):
+    r = result.argmax(-1).masked_select(~inverse_token_mask)
+    t = target.masked_select(~inverse_token_mask)
+    s = (r == t).sum()
+    return round(float(s/(result.size(0) * result.size(1))), 2)
